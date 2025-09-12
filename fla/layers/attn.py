@@ -43,7 +43,8 @@ class Attention(nn.Module):
         window_size: Optional[int] = None,
         rope_theta: Optional[float] = 10000.,
         max_position_embeddings: Optional[int] = None,
-        layer_idx: int = None
+        layer_idx: int = None,
+        use_rope: bool = True,
     ):
         super().__init__()
 
@@ -86,7 +87,7 @@ class Attention(nn.Module):
         if qk_norm:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
-
+        self.use_rope = use_rope
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
     def forward(
@@ -129,7 +130,9 @@ class Attention(nn.Module):
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        
+        if self.use_rope:
+            q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
