@@ -46,6 +46,7 @@ class TransformerBlock(GradientCheckpointingLayer):
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
             num_kv_heads=config.num_kv_heads,
+            head_dim=getattr(config, "head_dim", config.hidden_size // config.num_heads),
             qkv_bias=config.qkv_bias,
             qk_norm=config.qk_norm,
             window_size=config.window_size,

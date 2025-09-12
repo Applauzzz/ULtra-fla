@@ -17,6 +17,7 @@ class TransformerConfig(PretrainedConfig):
         num_hidden_layers: int = 24,
         num_heads: int = 32,
         num_kv_heads: Optional[int] = None,
+        head_dim: Optional[int] = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: Optional[int] = None,
@@ -44,6 +45,7 @@ class TransformerConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_heads = num_heads
+        self.head_dim = head_dim
         self.num_kv_heads = num_kv_heads
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
@@ -66,7 +68,6 @@ class TransformerConfig(PretrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
-
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
                 "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."

@@ -37,6 +37,7 @@ class Attention(nn.Module):
         hidden_size: int = 2048,
         num_heads: int = 32,
         num_kv_heads: Optional[int] = None,
+        head_dim: Optional[int] = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: Optional[int] = None,
@@ -53,7 +54,7 @@ class Attention(nn.Module):
         else:
             self.num_kv_heads = num_kv_heads
         self.num_kv_groups = num_heads // self.num_kv_heads
-        self.head_dim = self.hidden_size // self.num_heads
+        self.head_dim = head_dim if head_dim is not None else hidden_size // num_heads
         self.kv_dim = self.num_kv_heads * self.head_dim
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
@@ -65,12 +66,23 @@ class Attention(nn.Module):
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
-
-        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
-        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-
+    
+        # self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
+        # self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
+        # self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
+        # self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.q_proj = nn.Linear(
+            self.hidden_size, self.num_heads * self.head_dim, bias=self.qkv_bias
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size, self.num_kv_heads * self.head_dim, bias=self.qkv_bias
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size, self.num_kv_heads * self.head_dim, bias=self.qkv_bias
+        )
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.hidden_size, bias=False
+        )
         if qk_norm:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
