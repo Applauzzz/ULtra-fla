@@ -76,20 +76,21 @@ class TransformerConfig(PretrainedConfig):
             # self.no_rope_layers = [
             #     int((layer_idx + 1) % no_rope_layer_interval != 0) for layer_idx in range(num_hidden_layers)
             # ]
+            self.no_rope_layers = []
             pass
         else:
             self.no_rope_layers = no_rope_layers
 
         self.no_rope_layer_interval = no_rope_layer_interval
 
-        if layer_types is None:
-            layer_types = []
-            for layer_idx in range(num_hidden_layers):
-                has_rope = self.no_rope_layers[layer_idx]
-                if window_size is not None and not has_rope:
-                    layer_types.append("sliding_attention")
-                else:
-                    layer_types.append("full_attention")
+        # if layer_types is None:
+        #     layer_types = []
+        #     for layer_idx in range(num_hidden_layers):
+        #         has_rope = self.no_rope_layers[layer_idx]
+        #         if window_size is not None and not has_rope:
+        #             layer_types.append("sliding_attention")
+        #         else:
+        #             layer_types.append("full_attention")
 
         self.layer_types = layer_types
         # layer_type_validation(self.layer_types) # this is a new function of configuration_utils, leave it pass for now
