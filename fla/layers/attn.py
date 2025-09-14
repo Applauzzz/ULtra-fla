@@ -88,7 +88,8 @@ class Attention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
         self.use_rope = use_rope
-        self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
+        if self.use_rope:   
+            self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
     def forward(
         self,

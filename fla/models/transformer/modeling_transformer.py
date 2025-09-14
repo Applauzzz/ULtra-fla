@@ -53,7 +53,7 @@ class TransformerBlock(GradientCheckpointingLayer):
             rope_theta=config.rope_theta,
             max_position_embeddings=config.max_position_embeddings,
             layer_idx=layer_idx,
-            use_rope= (True if layer_idx in (getattr(config, "no_rope_layers", []) ) else False)
+            use_rope= (False if layer_idx in (getattr(config, "no_rope_layers", []) ) else True)
         )
 
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
