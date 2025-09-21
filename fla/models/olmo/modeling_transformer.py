@@ -13,12 +13,28 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-# from fla.layers.attn import Attention
+
+from einops import rearrange
+
+from fla.layers.utils import pad_input, unpad_input
+from fla.modules import RMSNorm, RotaryEmbedding
+from fla.ops.utils.index import prepare_lens_from_mask
+
+if TYPE_CHECKING:
+    from fla.models.utils import Cache
+
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+except ImportError:
+    warnings.warn(
+        "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
+        category=ImportWarning
+    )
+    flash_attn_func = None
 from fla.models.transformer.configuration_transformer import TransformerConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
-from fla.modules import RMSNorm
 from fla.modules.l2warp import l2_warp
 
 if TYPE_CHECKING:
