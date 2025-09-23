@@ -42,6 +42,8 @@ class TransformerBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
             
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+
+        
         self.attn = Attention(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
@@ -49,7 +51,7 @@ class TransformerBlock(GradientCheckpointingLayer):
             head_dim=getattr(config, "head_dim", config.hidden_size // config.num_heads),
             qkv_bias=config.qkv_bias,
             qk_norm=config.qk_norm,
-            window_size=config.window_size,
+            window_size=(config.window_size[layer_idx] if isinstance(getattr(config, "window_size", None), list) else getattr(config, "window_size", None)),
             rope_theta=config.rope_theta,
             max_position_embeddings=config.max_position_embeddings,
             layer_idx=layer_idx,

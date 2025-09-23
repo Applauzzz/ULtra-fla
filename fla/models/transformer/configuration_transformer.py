@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import warnings
-from typing import Optional
+from typing import Optional, Union
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -20,7 +20,7 @@ class TransformerConfig(PretrainedConfig):
         head_dim: Optional[int] = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
-        window_size: Optional[int] = None,
+        window_size: Union[int, list[int], None] = None,
         rope_theta: Optional[float] = 10000.,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
