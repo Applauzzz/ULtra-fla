@@ -13,9 +13,11 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
-from fla.models.transformer.configuration_transformer import TransformerConfig
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.layers.Uattn import Attention
+# NOTE here the  U structure is sensitive
+from fla.models.U_Net.configuration_Utransformer import TransformerConfig
+# from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.U_Net.ucache import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as TransformerMLP
 from fla.modules import RMSNorm
@@ -168,6 +170,9 @@ class TransformerModel(TransformerPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.sample_rate = 4
+        # NOTE here we fix the period to 4 layers
+        assert config.num_hidden_layers % 4 == 0
         self.layers = nn.ModuleList([TransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
@@ -193,7 +198,6 @@ class TransformerModel(TransformerPreTrainedModel):
         return_dict: Optional[bool] = None,
         **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        
         if output_attentions:
             warnings.warn(
                 "`TransformerModel` does not support output attention weights now, so `output_attentions` is set to `False`."
@@ -212,11 +216,26 @@ class TransformerModel(TransformerPreTrainedModel):
 
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
-            import pdb
-            pdb.set_trace()
 
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
+        
+        # NOTE get the basic info
+        cu_seqlens = kwargs.get('cu_seqlens', None)
+        assert cu_seqlens is None, "Here we don't support cu_seqlens for down/up sampling, it is a little bit complex"
+        batch_size, seqlens = input_ids.shape            
+        
+        if seqlens  == 1:
+            assert batch_size == 1, "single sequence generation is supported"
+            mode = "decode"
+           
+        else:
+            mode = "prefill"
+            downsampled_seqlens = (seqlens + self.sample_rate - 1) // self.sample_rate
+            repeats = torch.full((downsampled_seqlens,), self.sample_rate, dtype=torch.long, device=input_ids.device)
+            last_element_repeats = seqlens - (downsampled_seqlens - 1) * self.sample_rate
+            repeats[-1] = last_element_repeats
+        
 
         # embed positions
         hidden_states = inputs_embeds
@@ -224,27 +243,87 @@ class TransformerModel(TransformerPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         next_cache = None
+        
+        # token_update logit
+        token_update = False
+        if past_key_values is not None and seqlens == 1:
+            seen_token = past_key_values.get_seq_length()
+            token_update = (seen_token % self.sample_rate) == 0
 
-        for layer in self.layers:
+        for idx, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            layer_outputs = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                **kwargs
-            )
+            
+            # sample layer, we sample every 4 layers
+            if idx % 4 == 3:
+                sample = True
+            else:
+                sample = False
+            
+            # prepare residual for sample layer when training and prefill generate
+            if sample:
+                if attention_mask is not None:
+                    attention_mask = attention_mask[:, ::self.sample_rate].contiguous()
+                if (mode == "prefill"):
+                    residual = hidden_states
+                    hidden_states = hidden_states[:, ::self.sample_rate, :].contiguous()
+            
+            # if prefill or training or turn to update sample layer
+            if (mode == "prefill") or (token_update == True) or not sample:
 
-            hidden_states = layer_outputs[0]
+                layer_outputs = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    **kwargs
+                )
 
-            if use_cache:
-                next_cache = layer_outputs[2 if output_attentions else 1]
+                if not sample:
+                    # if not sample, just forward
+                    hidden_states = layer_outputs[0]
+                elif (mode == "prefill") and sample:
+                    upsampled_tensor = torch.repeat_interleave(layer_outputs[0], repeats, dim=1)
+                    if past_key_values is not None:
+                        identity_token = upsampled_tensor[:, -1, :]
+                        identity_token = past_key_values.update(
+                            identity_token=(identity_token,), 
+                            token_update=True,
+                            layer_idx=idx,
+                            )[0]
+                    hidden_states = upsampled_tensor + residual
+                elif (mode == "decode") and sample:
+                    # the token_update must be false
+                    assert past_key_values is not None, "check decode mode"
+                    identity_token = layer_outputs[0]
+                    identity_token = past_key_values.update(
+                            identity_token=(identity_token,),
+                            token_update=True,
+                            layer_idx=idx,
+                        )[0]
+                    
+                    hidden_states = identity_token + hidden_states
 
-            if output_attentions:
-                all_attns += (layer_outputs[1],)
+                if use_cache:
+                    next_cache = layer_outputs[2 if output_attentions else 1]
+
+                if output_attentions:
+                    all_attns += (layer_outputs[1],)
+            else:
+                identity_token = past_key_values.update(
+                    identity_token=(hidden_states,), # just pass the argu, donot update
+                    token_update=False,
+                    layer_idx=idx,
+                )[0]
+                hidden_states = hidden_states + identity_token
+
+                if use_cache:
+                    next_cache = past_key_values
+
+
+            
 
         hidden_states = self.norm(hidden_states)
 
@@ -274,6 +353,8 @@ class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None
 
+        
+        
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -310,6 +391,7 @@ class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
         logits_to_keep: Optional[int] = 0,
         **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -363,3 +445,94 @@ class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+# def prepare_sample(
+#     sample_list: List,
+#     sample_rate: int = 4,
+#     inputs: torch.Tensor,
+#     num_stages: int = 1,
+#     cu_seqlens: torch.Tensor = None,
+#     seen_tokens: int = None,
+#     attention_mask: torch.Tensor = None,
+# ):
+#     B, L = inputs.shape
+    
+#     if cu_seqlens is not None:
+#         assert seen_tokens is None
+#         assert attention_mask is None
+#         mode = "varlen_train"
+#     elif seen_tokens is not None:
+#         assert attention_mask is not None
+#         mode = "single_infer"
+#     else:
+#         assert attention_mask is None
+#         assert cu_seqlens is None
+#         assert seen_tokens is None
+#         mode = "packing_train"
+    
+#     sample_strategies = []
+#     if mode == "packing_train":
+#         last_L = L
+#         for i in num_stages:
+#             new_L = last_L // sample_rate
+#             strategy = {
+#                 "sample": "downsample",
+#                 "mode": mode,
+#                 "stage": i,
+#                 "index": None,
+#                 "new_attention_mask": None,
+#                 "new_cu_seqlens": None,
+#             }
+#             sample_strategies.append(strategy)
+#         for i in num_stages:
+#             strategy = {
+#                 "sample": "upsample",
+#                 "mode": mode,
+#                 "stage": i,
+#                 "index": None,
+#                 "new_attention_mask": None,
+#                 "new_cu_seqlens": None,
+#             }
+#             sample_strategies.append(strategy)
+#     elif mode == "single_infer":
+#         for i in num_stages:
+#             strategy = {
+#                 "sample": "downsample",
+#                 "mode": mode,
+#                 "stage": i,
+#                 "index": None,
+#                 "new_attention_mask": None,
+#                 "new_cu_seqlens": None,
+#             }
+#             sample_strategies.append(strategy)
+#         for i in num_stages:
+#             strategy = {
+#                 "sample": "upsample",
+#                 "mode": mode,
+#                 "stage": i,
+#                 "index": None,
+#                 "new_attention_mask": None,
+#                 "new_cu_seqlens": None,
+#             }
+#             sample_strategies.append(strategy)
+#     elif mode == "varlen_train":
+#         for i in num_stages:
+#             strategy = {
+#                 "sample": "downsample",
+#                 "mode": mode,
+#                 "stage": i,
+#                 "index": None,
+#                 "new_attention_mask": None,
+#                 "new_cu_seqlens": None,
+#             }
+#             sample_strategies.append(strategy)
+#         for i in num_stages:
+#             strategy = {
+#                 "sample": "upsample",
+#                 "mode": mode,
+#                 "stage": i,
+#                 "index": None,
+#                 "new_attention_mask": None,
+#                 "new_cu_seqlens": None,
+#             }
+#             sample_strategies.append(strategy)
