@@ -18,7 +18,7 @@ if __name__ == "__main__":
     loss = model(input_ids=input_ids, labels=input_ids).loss
     print(input_ids.shape)
     print("start to generate")
-    loss = (output * do).sum()
+    # loss = (output * do).sum()
     loss.backward()
     
     # output = model.generate(inputs=input_ids, max_new_tokens=15, )
