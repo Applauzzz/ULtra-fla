@@ -293,7 +293,7 @@ class TransformerModel(TransformerPreTrainedModel):
                             token_update=True,
                             layer_idx=idx,
                             )[0]
-                    hidden_states[:, ::self.sample_rate, :] += upsampled_tensor
+                    hidden_states[:, ::self.sample_rate, :] += layer_outputs[0]
                 elif (mode == "decode") and sample:
                     # the token_update must be false
                     assert past_key_values is not None, "check decode mode"
