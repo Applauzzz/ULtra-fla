@@ -266,7 +266,7 @@ class TransformerModel(TransformerPreTrainedModel):
                 if attention_mask is not None:
                     attention_mask = attention_mask[:, ::self.sample_rate].contiguous()
                 if (mode == "prefill"):
-                    residual = hidden_states
+                    # residual = hidden_states
                     hidden_states = hidden_states[:, ::self.sample_rate, :].contiguous()
             
             # if prefill or training or turn to update sample layer
@@ -293,7 +293,7 @@ class TransformerModel(TransformerPreTrainedModel):
                             token_update=True,
                             layer_idx=idx,
                             )[0]
-                    hidden_states = upsampled_tensor + residual
+                    hidden_states[:, ::self.sample_rate, :] += upsampled_tensor
                 elif (mode == "decode") and sample:
                     # the token_update must be false
                     assert past_key_values is not None, "check decode mode"
