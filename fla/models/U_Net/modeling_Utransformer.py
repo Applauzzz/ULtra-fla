@@ -294,6 +294,7 @@ class TransformerModel(TransformerPreTrainedModel):
                     #         layer_idx=idx,
                     #         )[0]
                     residual[:, ::self.sample_rate, :] = layer_outputs[0]
+                    residual = residual.contiguous()
                 elif (mode == "decode") and sample:
                     # the token_update must be false
                     assert past_key_values is not None, "check decode mode"
