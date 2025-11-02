@@ -212,8 +212,8 @@ class TransformerModel(TransformerPreTrainedModel):
 
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
-            import pdb
-            pdb.set_trace()
+            # import pdb
+            # pdb.set_trace()
 
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
