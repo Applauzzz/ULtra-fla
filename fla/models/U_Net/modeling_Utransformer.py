@@ -285,14 +285,14 @@ class TransformerModel(TransformerPreTrainedModel):
                     # if not sample, just forward
                     hidden_states = layer_outputs[0]
                 elif (mode == "prefill") and sample:
-                    upsampled_tensor = torch.repeat_interleave(layer_outputs[0], repeats, dim=1)
-                    if past_key_values is not None:
-                        identity_token = upsampled_tensor[:, -1, :]
-                        identity_token = past_key_values.update(
-                            identity_token=(identity_token,), 
-                            token_update=True,
-                            layer_idx=idx,
-                            )[0]
+                    # upsampled_tensor = torch.repeat_interleave(layer_outputs[0], repeats, dim=1)
+                    # if past_key_values is not None:
+                    #     identity_token = upsampled_tensor[:, -1, :]
+                    #     identity_token = past_key_values.update(
+                    #         identity_token=(identity_token,), 
+                    #         token_update=True,
+                    #         layer_idx=idx,
+                    #         )[0]
                     residual[:, ::self.sample_rate, :] = layer_outputs[0]
                 elif (mode == "decode") and sample:
                     # the token_update must be false
