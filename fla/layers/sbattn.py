@@ -234,7 +234,7 @@ class SBAttention(nn.Module):
         if not output_attentions:
             attentions = None
 
-        return o, attentions, past_key_values
+        return o, attentions, past_key_values, balance_loss_k + balance_loss_q
 
 if __name__ == "__main__":
     print("testing")

@@ -3,12 +3,12 @@ import torch
 # from fla.models.U_Net.modeling_Utransformer import TransformerForCausalLM
 # from fla.models.U_Net.configuration_Utransformer import TransformerConfig
 
-from fla.models.U_Net_m import TransformerConfig
-from fla.models.U_Net_m import TransformerForCausalLM
+from fla.models.transformer_sb import TransformerConfig
+from fla.models.transformer_sb import TransformerForCausalLM
 import pdb
 
 if __name__ == "__main__":
-    config = TransformerConfig.from_pretrained("/mnt/bn/tiktok-mm-5/aiic/users/CHOU_Yuhong/codebase/long_context_team/ULTra/main/model_config/1B3_baseline/u_net")
+    config = TransformerConfig()
     print("start to model")
     model = TransformerForCausalLM(config).to(torch.bfloat16).cuda()
     print("start to input")

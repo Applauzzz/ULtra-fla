@@ -16,6 +16,8 @@ class GradTop1(torch.autograd.Function):
         indices, = ctx.saved_tensors
         grad_score = torch.zeros(ctx.score_shape, dtype=grad_output.dtype, device=grad_output.device)
         index = indices.unsqueeze(-1)
+        if index.dtype is torch.int32:
+            index = index.to(torch.int64)
         src = grad_output.unsqueeze(-1)
         grad_score.scatter_add_(-1, index, src)
         return grad_score, None
@@ -47,10 +49,11 @@ class MultiHeadRouter(nn.Module):
         bin_indices = bincount(indices, self.num_states)
         mean_indices = bin_indices.float() / T # [H, NS]
 
-        balance_loss = self.num_states * (mean_indices * score).mean((0, 1)).sum()
+        balance_loss = float(self.num_states) * (mean_indices * score).mean((0, 1)).sum()
 
 
-        return sg_indices.to(dtype), indices, balance_loss.to(dtype)
+        # Here the balance_loss is kept in float32 for loss compute
+        return sg_indices.to(dtype), indices, balance_loss
     
     def extra_repr(self) -> str:
         return f"num_heads={self.num_heads}, num_states={self.num_states}, head_dim={self.head_dim}"
