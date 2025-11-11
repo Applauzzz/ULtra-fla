@@ -830,9 +830,11 @@ def parallel_nsa(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
+    # NOTE use cu_seqlens_k
     k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
     o_cmp, lse_cmp = None, None
-    if g_cmp is not None:
+    
+    if g_cmp is not None: # NOTE actually gate must not be None
         o_cmp, lse_cmp = parallel_nsa_compression(
             q=q,
             k=k_cmp,
@@ -840,7 +842,8 @@ def parallel_nsa(
             block_size=block_size,
             scale=scale,
             cu_seqlens=cu_seqlens
-        )
+        ) # NOTE here we should have a cu_seqlens_q & cu_seqlens_k version
+        
         if block_indices is not None:
             warnings.warn("`block_indices` will be ignored when `g_cmp` is provided")
         block_indices = parallel_nsa_topk(
