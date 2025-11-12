@@ -149,6 +149,7 @@ class Attention(nn.Module):
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         # Contains at least one padding token in the sequence
+        # Decode
         if attention_mask is not None:
             if q.shape[1] == 1 and self.window_size is not None:
                 attention_mask = attention_mask[:, -self.window_size:]
@@ -165,6 +166,7 @@ class Attention(nn.Module):
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
             o = pad_input(o, indices_q, batch_size, q_len)
+        # Train and Prefill 
         elif cu_seqlens is not None:
             o = flash_attn_varlen_func(
                 q.squeeze(0), k.squeeze(0), v.squeeze(0),

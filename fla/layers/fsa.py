@@ -31,10 +31,10 @@ logger = logging.get_logger(__name__)
 
 
 from fla.ops.nsa_ref.ops import (compressed_attention, linear_compress,
-                         topk_sparse_attention)
+                         topk_sparse_attention, TopkSparseAttention)
 from fla.ops import FSATopkSparseAttention
 
-def FSA_topk_sparse_attention(
+def topk_sparse_attention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -54,17 +54,14 @@ def FSA_topk_sparse_attention(
         v (torch.Tensor): shape [total_len, num_kv_heads, head_dim]
         topk_idx (torch.Tensor): topk block idx for each query, shape [num_kv_heads, total_len, topk]. -1 means padding.
         block_size (int): key value block size.
-        cu_seqlens_q (torch.Tensor): shape [batch_size + 1], similar to cu_seqlens in flash_attn_func_varlen.
-        cu_seqlens_k (torch.Tensor): shape [batch_size + 1], similar to cu_seqlens in flash_attn_func_varlen.
-        max_seqlen_q (int): max sequence length of q.
-        max_seqlen_k (int): max sequence length of k.
+        cu_seqlens (torch.Tensor): shape [batch_size + 1], similar to cu_seqlens in flash_attn_func_varlen.
         softmax_scale (Optional[float], optional): Defaults to None, means 1/sqrt(head_dim).
 
     Returns:
         torch.Tensor: attention output, shape [total_len, num_q_heads, head_dim]
     """
 
-    return FSATopkSparseAttention.apply(
+    return TopkSparseAttention.apply(
         q,
         k,
         v,
@@ -143,15 +140,14 @@ def fsa_func_varlen(
         
     gqa_group_size = num_heads // num_kv_heads
 
-    # TODO: fine-grained fall back mechanism will be integrated into kernels
-    if gqa_group_size <= 8:
-        sparse_attn_output = FSA_topk_sparse_attention(
-            q, k, v, topk_idx, block_size, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, None
-        )
-    else:
-        sparse_attn_output = topk_sparse_attention(
-            q, k, v, topk_idx, block_size, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, None
-        )
+    # # TODO: fine-grained fall back mechanism will be integrated into kernels
+    # if gqa_group_size <= 8:
+    #     sparse_attn_output = FSA_topk_sparse_attention(
+    #         q, k, v, topk_idx, block_size, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, None
+    #     )
+    sparse_attn_output = topk_sparse_attention(
+        q, k, v, topk_idx, block_size, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, None
+    )
     
     # sliding window attention
     sliding_attn_output = flash_attn_varlen_func(
@@ -407,20 +403,106 @@ class Attention(nn.Module):
         return o, attentions, past_key_values
 
 if __name__ == "__main__":
-    print("start")
-    B, L, D = 2, 4096, 1024
+    # =================================================================================
+    # Original Test Case (for sequences of the same length)
+    # =================================================================================
+    print("--- Running Original Test (Equal Sequence Lengths) ---")
+    B, L, D = 2, 1024, 1024  # Reduced sequence length for faster testing
     hidden_size = D
     num_heads = 8
     num_kv_heads = 8
-    print("creating")
-    module = Attention(
-        hidden_size=hidden_size,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-    ).to(torch.bfloat16).cuda()
-    print("well prepared")
-    hidden_state = torch.randn(B, L, D).to(torch.bfloat16).cuda()
-    print("compute")
-    output = module(hidden_state)
-    print("good")
-
+    print("Creating model...")
+    try:
+        module = Attention(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+        ).to(torch.bfloat16).cuda()
+        print("Model created successfully.")
+        hidden_state = torch.randn(B, L, D, dtype=torch.bfloat16, device='cuda')
+        print("Computing with equal length inputs...")
+        # This tests the `else` block in the forward pass
+        output, _, _ = module(hidden_state)
+        print(f"Output shape (equal lengths): {output.shape}")
+        print("Original test completed successfully.\n")
+    except Exception as e:
+        print(f"An error occurred during the original test: {e}")
+ # =================================================================================
+    # New Test Case for Mismatched cu_seqlens_q and cu_seqlens_k
+    # =================================================================================
+    print("--- Running New Test (Mismatched Sequence Lengths for Q and K/V) ---")
+    # Use different parameters to avoid confusion
+    test_batch_size = 4
+    test_hidden_size = 1024
+    test_num_heads = 8
+    test_num_kv_heads = 4  # Using GQA is a good practice for testing
+    head_dim = test_hidden_size // test_num_heads
+    # Define different sequence lengths for Q and K/V
+    # For example, Q has shorter sequences than K/V
+    q_seqlens = [256, 512, 128, 384]
+    k_seqlens = [300, 600, 150, 400]
+    # Ensure the test setup is valid
+    assert test_batch_size == len(q_seqlens), "Batch size must match the number of sequence lengths."
+    assert len(q_seqlens) == len(k_seqlens), "Q and K/V must have the same number of sequences in the batch."
+    max_seqlen_q = max(q_seqlens)
+    max_seqlen_k = max(k_seqlens)
+    print(f"Batch Size: {test_batch_size}")
+    print(f"Q Sequence Lengths: {q_seqlens} (Max: {max_seqlen_q})")
+    print(f"K/V Sequence Lengths: {k_seqlens} (Max: {max_seqlen_k})")
+    # Manually create cu_seqlens
+    cu_seqlens_q = torch.tensor([0] + list(torch.cumsum(torch.tensor(q_seqlens), 0)), dtype=torch.int32, device='cuda')
+    cu_seqlens_k = torch.tensor([0] + list(torch.cumsum(torch.tensor(k_seqlens), 0)), dtype=torch.int32, device='cuda')
+    print(f"cu_seqlens_q: {cu_seqlens_q}")
+    print(f"cu_seqlens_k: {cu_seqlens_k}")
+    total_len_q = sum(q_seqlens)
+    total_len_k = sum(k_seqlens)
+    # Create ragged tensors (concatenated along the sequence dimension)
+    # These mimic the output of `unpad_input`
+    q_unpadded = torch.randn(total_len_q, test_num_heads, head_dim, dtype=torch.bfloat16, device='cuda')
+    k_unpadded = torch.randn(total_len_k, test_num_kv_heads, head_dim, dtype=torch.bfloat16, device='cuda')
+    v_unpadded = torch.randn(total_len_k, test_num_kv_heads, head_dim, dtype=torch.bfloat16, device='cuda')
+    gate_unpadded = torch.randn(total_len_q, 3, dtype=torch.bfloat16, device='cuda')
+    print(f"Shape of unpadded Q: {q_unpadded.shape}")
+    print(f"Shape of unpadded K: {k_unpadded.shape}")
+    print(f"Shape of unpadded V: {v_unpadded.shape}")
+    # Create a new model instance for this test
+    try:
+        varlen_module = Attention(
+            hidden_size=test_hidden_size,
+            num_heads=test_num_heads,
+            num_kv_heads=test_num_kv_heads,
+        ).to(torch.bfloat16).cuda()
+        print("Varlen model created successfully.")
+        print("Computing with fsa_func_varlen and mismatched cu_seqlens...")
+        # This call directly tests the target function
+        output_varlen = fsa_func_varlen(
+            q=q_unpadded,
+            k=k_unpadded,
+            v=v_unpadded,
+            gate=gate_unpadded,
+            compress_key=varlen_module.compress_key,
+            compress_value=varlen_module.compress_value,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            num_heads=varlen_module.num_heads,
+            num_kv_heads=varlen_module.num_kv_heads,
+            init_blocks=varlen_module.init_blocks,
+            local_blocks=varlen_module.local_blocks,
+            window_size=varlen_module.window_size,
+            kernel_size=varlen_module.kernel_size,
+            kernel_stride=varlen_module.kernel_stride,
+            block_size=varlen_module.block_size,
+            topk=varlen_module.topk,
+        )
+        print(f"Output shape from fsa_func_varlen: {output_varlen.shape}")
+        # The output should have a total length equal to the total length of Q
+        assert output_varlen.shape[0] == total_len_q
+        assert output_varlen.shape[1] == test_num_heads
+        assert output_varlen.shape[2] == head_dim
+        print("New test for mismatched sequence lengths completed successfully!")
+    except Exception as e:
+        print(f"An error occurred during the mismatched lengths test: {e}")
+        import traceback
+        traceback.print_exc()

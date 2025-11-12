@@ -14,7 +14,7 @@
 
 from .compressed_attention import compressed_attention
 from .linear_compress import linear_compress
-from .topk_sparse_attention import topk_sparse_attention
+from .topk_sparse_attention import topk_sparse_attention, TopkSparseAttention
 from .weighted_pool import (avgpool_compress, softmaxpool_compress,
                                        weightedpool_compress)
 from .utils import is_hopper_gpu, get_num_warps_stages

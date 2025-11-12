@@ -926,6 +926,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
     assert block_size in {32, 64, 128, 256}
     # shape
 
+    # NOTE here I am not sure about it
     total_len, num_heads, head_dim = q.shape
     total_len, num_kv_heads, head_dim = k.shape
 
