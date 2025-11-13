@@ -30,49 +30,14 @@ except ImportError:
 logger = logging.get_logger(__name__)
 
 
-from fla.ops.nsa_ref.ops import (compressed_attention, linear_compress,
-                         topk_sparse_attention, TopkSparseAttention)
-from fla.ops import FSATopkSparseAttention
-
-def topk_sparse_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    topk_idx: torch.Tensor,
-    block_size: int,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_k: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
-    softmax_scale: Optional[float] = None,
-) -> torch.Tensor:
-    """Topk sparse attention varlen version implemented in triton.
-
-    Args:
-        q (torch.Tensor): shape [total_len, num_q_heads, head_dim]
-        k (torch.Tensor): shape [total_len, num_kv_heads, head_dim]
-        v (torch.Tensor): shape [total_len, num_kv_heads, head_dim]
-        topk_idx (torch.Tensor): topk block idx for each query, shape [num_kv_heads, total_len, topk]. -1 means padding.
-        block_size (int): key value block size.
-        cu_seqlens (torch.Tensor): shape [batch_size + 1], similar to cu_seqlens in flash_attn_func_varlen.
-        softmax_scale (Optional[float], optional): Defaults to None, means 1/sqrt(head_dim).
-
-    Returns:
-        torch.Tensor: attention output, shape [total_len, num_q_heads, head_dim]
-    """
-
-    return TopkSparseAttention.apply(
-        q,
-        k,
-        v,
-        topk_idx,
-        block_size,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        softmax_scale,
-    )
+from fla.ops.native_sparse_attention.ops import (
+    compressed_attention,
+    topk_sparse_attention,
+    linear_compress,
+    compressed_attention_decode,
+    topk_sparse_attention_decode,
+    v2b,
+)
 
 def fsa_func_varlen(
     q: torch.Tensor,
@@ -95,80 +60,179 @@ def fsa_func_varlen(
     block_size: int = 64,
     topk: int = 16,
 ):
-    # compressed key and value before rope
-    compressed_k, compressed_cu_seqlens = linear_compress(
-        k,
-        compress_key,
-        cu_seqlens_k,
-        kernel_size,
-        kernel_stride,
-        None,
-    )
-    compressed_v, _ = linear_compress(
-        v,
-        compress_value,
-        cu_seqlens_k,
-        kernel_size,
-        kernel_stride,
-        None,
-    )
+    batch_size = cu_seqlens_q.shape[0] - 1
+    if torch.equal(cu_seqlens_q, cu_seqlens_k):
+        mode = "prefill"
+    elif torch.equal(cu_seqlens_q, torch.arange(0, batch_size + 1, dtype=cu_seqlens_q.dtype, device=cu_seqlens_q.device)):
+        mode = "decode"
+    else:
+        raise ValueError(
+            f"cu_seqlens_q and cu_seqlens_k must be equal or cu_seqlens_q must be cu_seqlens_k + 1, but got {cu_seqlens_q} and {cu_seqlens_k}"
+        )
+    if mode == "prefill":
+        # compressed key and value before rope
+        compressed_k, compressed_cu_seqlens = linear_compress(
+            k,
+            compress_key,
+            cu_seqlens_k,
+            kernel_size,
+            kernel_stride,
+            None,
+        )
+        compressed_v, _ = linear_compress(
+            v,
+            compress_value,
+            cu_seqlens_k,
+            kernel_size,
+            kernel_stride,
+            None,
+        )
 
-    # seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-    # max_seqlen_q = seqlens_q.max().item()
-    # seqlens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-    # max_seqlen_k = seqlens_k.max().item()
-    compressed_seqlens = compressed_cu_seqlens[1:] - compressed_cu_seqlens[:-1]
-    max_seqlens_compressed = compressed_seqlens.max().item()
-    
-    compressed_attn_output, topk_idx = compressed_attention(
-        q,
-        compressed_k,
-        compressed_v,
-        kernel_size,
-        kernel_stride,
-        block_size,
-        topk,
-        cu_seqlens_q,
-        compressed_cu_seqlens,
-        max_seqlen_q,
-        max_seqlens_compressed,
-        None,
-        init_blocks,
-        local_blocks,
-        parallel_topk_compute=False,
-    )
+        # seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        # max_seqlen_q = seqlens_q.max().item()
+        # seqlens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+        # max_seqlen_k = seqlens_k.max().item()
+        compressed_seqlens = compressed_cu_seqlens[1:] - compressed_cu_seqlens[:-1]
+        max_seqlens_compressed = compressed_seqlens.max().item()
         
-    gqa_group_size = num_heads // num_kv_heads
+        compressed_attn_output, topk_idx = compressed_attention(
+            q,
+            compressed_k,
+            compressed_v,
+            kernel_size,
+            kernel_stride,
+            block_size,
+            topk,
+            cu_seqlens_q,
+            compressed_cu_seqlens,
+            max_seqlen_q,
+            max_seqlens_compressed,
+            None,
+            init_blocks,
+            local_blocks,
+            parallel_topk_compute=False,
+        )
 
-    # # TODO: fine-grained fall back mechanism will be integrated into kernels
-    # if gqa_group_size <= 8:
-    #     sparse_attn_output = FSA_topk_sparse_attention(
-    #         q, k, v, topk_idx, block_size, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, None
-    #     )
-    sparse_attn_output = topk_sparse_attention(
-        q, k, v, topk_idx, block_size, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, None
-    )
-    
-    # sliding window attention
-    sliding_attn_output = flash_attn_varlen_func(
-        q,
-        k,
-        v,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        causal=True,
-        window_size=(window_size, -1),
-    )
-    
-    attn_output = (
-        gate[:, 0:1, None] * compressed_attn_output
-        + gate[:, 1:2, None] * sparse_attn_output
-        + gate[:, 2:3, None] * sliding_attn_output
-    )
+        sparse_attn_output = topk_sparse_attention(
+            q, k, v, topk_idx, block_size, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, None
+        )
+        
+        # sliding window attention
+        sliding_attn_output = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            causal=True,
+            window_size=(window_size, -1),
+        )
+        
+        attn_output = (
+            gate[:, 0:1, None] * compressed_attn_output
+            + gate[:, 1:2, None] * sparse_attn_output
+            + gate[:, 2:3, None] * sliding_attn_output
+        )
 
-    return attn_output
+        return attn_output
+    elif mode == "decode":
+
+        # compressed key and value before rope
+        compressed_k, compressed_cu_seqlens = linear_compress(
+            k,
+            compress_key,
+            cu_seqlens_k,
+            kernel_size,
+            kernel_stride,
+            None,
+        )
+        compressed_v, _ = linear_compress(
+            v,
+            compress_value,
+            cu_seqlens_k,
+            kernel_size,
+            kernel_stride,
+            None,
+        )
+
+        seqlens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+        max_seqlen_k = seqlens_k.max().item()
+        k_flat = v2b(
+            k,
+            cu_seqlens_k,
+            seqlens_k,
+            max_seqlen_k,
+        )
+        v_flat = v2b(
+            v,
+            cu_seqlens_k,
+            seqlens_k,
+            max_seqlen_k,
+        )
+
+        compressed_seqlens = compressed_cu_seqlens[1:] - compressed_cu_seqlens[:-1]
+        max_seqlen_compressed = compressed_seqlens.max().item()
+
+        compressed_k_flat = v2b(
+            compressed_k,
+            compressed_cu_seqlens,
+            compressed_seqlens,
+            max_seqlen_compressed,
+        )
+        compressed_v_flat = v2b(
+            compressed_v,
+            compressed_cu_seqlens,
+            compressed_seqlens,
+            max_seqlen_compressed,
+        )
+        compressed_attn_output, topk_idx = compressed_attention_decode(
+            q,
+            k_flat,
+            v_flat,
+            seqlens_k,
+            compressed_seqlens,
+            kernel_size,
+            kernel_stride,
+            block_size,
+            topk,
+            init_blocks,
+            local_blocks,
+        )
+
+        sparse_attn_output = topk_sparse_attention_decode(
+            q,
+            k_flat,
+            v_flat,
+            topk_idx,
+            block_size,
+            seqlens_k,
+        )
+
+        # sliding window attention
+        sliding_attn_output = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            causal=True,
+            window_size=(window_size, -1),
+        )
+
+        attn_output = (
+            gate[:, 0:1, None] * compressed_attn_output
+            + gate[:, 1:2, None] * sparse_attn_output
+            + gate[:, 2:3, None] * sliding_attn_output
+        )
+
+        return attn_output
+
+    else:
+        raise ValueError("Only prefill (or Training) and Decode modes are supported for now")
 
 
 class Attention(nn.Module):
@@ -439,8 +503,8 @@ if __name__ == "__main__":
     head_dim = test_hidden_size // test_num_heads
     # Define different sequence lengths for Q and K/V
     # For example, Q has shorter sequences than K/V
-    q_seqlens = [256, 512, 128, 384]
-    k_seqlens = [300, 600, 150, 400]
+    q_seqlens = [1, 1, 1, 1]
+    k_seqlens = [300, 600, 150, 40000]
     # Ensure the test setup is valid
     assert test_batch_size == len(q_seqlens), "Batch size must match the number of sequence lengths."
     assert len(q_seqlens) == len(k_seqlens), "Q and K/V must have the same number of sequences in the batch."

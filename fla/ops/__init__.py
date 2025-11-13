@@ -26,7 +26,14 @@ from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_r
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from .simple_gla import chunk_simple_gla, fused_chunk_simple_gla, fused_recurrent_simple_gla, parallel_simple_gla
-from .fsa import FSATopkSparseAttention
+from .native_sparse_attention import (
+    compressed_attention,
+    topk_sparse_attention,
+    linear_compress,
+    compressed_attention_decode,
+    topk_sparse_attention_decode,
+    v2b,
+)
 
 
 __all__ = [
@@ -52,6 +59,5 @@ __all__ = [
     'chunk_rwkv6', 'fused_recurrent_rwkv6',
     'chunk_rwkv7', 'fused_recurrent_rwkv7',
     'chunk_simple_gla', 'fused_chunk_simple_gla', 'fused_recurrent_simple_gla', 'parallel_simple_gla',
-    'FSATopkSparseAttention',
-    
+    'compressed_attention', 'topk_sparse_attention', 'linear_compress', 'compressed_attention_decode', 'topk_sparse_attention_decode', 'v2b',
 ]
