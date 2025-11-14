@@ -34,6 +34,7 @@ from .native_sparse_attention import (
     topk_sparse_attention_decode,
     v2b,
 )
+from .moba import moba_layer, moba_attn_varlen_naive, moba_attn_varlen
 
 
 __all__ = [
@@ -60,4 +61,5 @@ __all__ = [
     'chunk_rwkv7', 'fused_recurrent_rwkv7',
     'chunk_simple_gla', 'fused_chunk_simple_gla', 'fused_recurrent_simple_gla', 'parallel_simple_gla',
     'compressed_attention', 'topk_sparse_attention', 'linear_compress', 'compressed_attention_decode', 'topk_sparse_attention_decode', 'v2b',
+    'moba_layer', 'moba_attn_varlen_naive', 'moba_attn_varlen',
 ]
