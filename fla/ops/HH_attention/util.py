@@ -91,6 +91,7 @@ def insert_special_tokens(
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         max_seqlen = seqlens.max().item()
         num_inserts = ((seqlens - 1) // chunk_size)
+        num_inserts = torch.clamp(num_inserts, max=0)
         cu_chunklens = torch.cat([torch.tensor([0], dtype=cu_seqlens.dtype, device=cu_seqlens.device), num_inserts.cumsum(0)], dim=0)
         cu_seqlens_q = torch.cat([torch.tensor([0], dtype=cu_seqlens.dtype, device=cu_seqlens.device), (seqlens + num_inserts).cumsum(0)], dim=0)
         num_inserts_total = cu_chunklens[-1].item()

@@ -30,213 +30,10 @@ except ImportError:
 logger = logging.get_logger(__name__)
 
 
-# from fla.ops.native_sparse_attention.ops import (
-#     compressed_attention,
-#     topk_sparse_attention,
-#     linear_compress,
-#     compressed_attention_decode,
-#     topk_sparse_attention_decode,
-#     v2b,
-# )
-# NOTE import MoBA related repo
-
-def moba_func_varlen(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    gate: torch.Tensor,
-    compress_key: torch.Tensor,
-    compress_value: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_k: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
-    num_heads: int,
-    num_kv_heads: int,
-    init_blocks: int = 1,
-    local_blocks: int = 2,
-    window_size: int = 512,
-    kernel_size: int = 32,
-    kernel_stride: int = 16,
-    block_size: int = 64,
-    topk: int = 16,
-):
-    batch_size = cu_seqlens_q.shape[0] - 1
-    if torch.equal(cu_seqlens_q, cu_seqlens_k):
-        mode = "prefill"
-    elif torch.equal(cu_seqlens_q, torch.arange(0, batch_size + 1, dtype=cu_seqlens_q.dtype, device=cu_seqlens_q.device)):
-        mode = "decode"
-    else:
-        raise ValueError(
-            f"cu_seqlens_q and cu_seqlens_k must be equal or cu_seqlens_q must be cu_seqlens_k + 1, but got {cu_seqlens_q} and {cu_seqlens_k}"
-        )
-    if mode == "prefill":
-        # compressed key and value before rope
-        compressed_k, compressed_cu_seqlens = linear_compress(
-            k,
-            compress_key,
-            cu_seqlens_k,
-            kernel_size,
-            kernel_stride,
-            None,
-        )
-        compressed_v, _ = linear_compress(
-            v,
-            compress_value,
-            cu_seqlens_k,
-            kernel_size,
-            kernel_stride,
-            None,
-        )
-
-        # seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        # max_seqlen_q = seqlens_q.max().item()
-        # seqlens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-        # max_seqlen_k = seqlens_k.max().item()
-        compressed_seqlens = compressed_cu_seqlens[1:] - compressed_cu_seqlens[:-1]
-        max_seqlens_compressed = compressed_seqlens.max().item()
-        
-        compressed_attn_output, topk_idx = compressed_attention(
-            q,
-            compressed_k,
-            compressed_v,
-            kernel_size,
-            kernel_stride,
-            block_size,
-            topk,
-            cu_seqlens_q,
-            compressed_cu_seqlens,
-            max_seqlen_q,
-            max_seqlens_compressed,
-            None,
-            init_blocks,
-            local_blocks,
-            parallel_topk_compute=False,
-        )
-
-        sparse_attn_output = topk_sparse_attention(
-            q, k, v, topk_idx, block_size, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, None
-        )
-        
-        # sliding window attention
-        sliding_attn_output = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            causal=True,
-            window_size=(window_size, -1),
-        )
-        
-        attn_output = (
-            gate[:, 0:1, None] * compressed_attn_output
-            + gate[:, 1:2, None] * sparse_attn_output
-            + gate[:, 2:3, None] * sliding_attn_output
-        )
-
-        return attn_output
-    elif mode == "decode":
-
-        # compressed key and value before rope
-        compressed_k, compressed_cu_seqlens = linear_compress(
-            k,
-            compress_key,
-            cu_seqlens_k,
-            kernel_size,
-            kernel_stride,
-            None,
-        )
-        compressed_v, _ = linear_compress(
-            v,
-            compress_value,
-            cu_seqlens_k,
-            kernel_size,
-            kernel_stride,
-            None,
-        )
-
-        seqlens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-        max_seqlen_k = seqlens_k.max().item()
-        k_flat = v2b(
-            k,
-            cu_seqlens_k,
-            seqlens_k,
-            max_seqlen_k,
-        )
-        v_flat = v2b(
-            v,
-            cu_seqlens_k,
-            seqlens_k,
-            max_seqlen_k,
-        )
-
-        compressed_seqlens = compressed_cu_seqlens[1:] - compressed_cu_seqlens[:-1]
-        max_seqlen_compressed = compressed_seqlens.max().item()
-
-        compressed_k_flat = v2b(
-            compressed_k,
-            compressed_cu_seqlens,
-            compressed_seqlens,
-            max_seqlen_compressed,
-        )
-        compressed_v_flat = v2b(
-            compressed_v,
-            compressed_cu_seqlens,
-            compressed_seqlens,
-            max_seqlen_compressed,
-        )
-        compressed_attn_output, topk_idx = compressed_attention_decode(
-            q,
-            k_flat,
-            v_flat,
-            seqlens_k,
-            compressed_seqlens,
-            kernel_size,
-            kernel_stride,
-            block_size,
-            topk,
-            init_blocks,
-            local_blocks,
-        )
-
-        sparse_attn_output = topk_sparse_attention_decode(
-            q,
-            k_flat,
-            v_flat,
-            topk_idx,
-            block_size,
-            seqlens_k,
-        )
-
-        # sliding window attention
-        sliding_attn_output = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            causal=True,
-            window_size=(window_size, -1),
-        )
-
-        attn_output = (
-            gate[:, 0:1, None] * compressed_attn_output
-            + gate[:, 1:2, None] * sparse_attn_output
-            + gate[:, 2:3, None] * sliding_attn_output
-        )
-
-        return attn_output
-
-    else:
-        raise ValueError("Only prefill (or Training) and Decode modes are supported for now")
+from fla.ops import moba_attn_varlen
 
 
-class Attention(nn.Module):
+class MobaAttention(nn.Module):
 
     def __init__(
         self,
@@ -246,13 +43,9 @@ class Attention(nn.Module):
         head_dim: Optional[int] = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
-        window_size: Optional[int] = 512,
-        init_blocks: Optional[int] = 1,
-        local_blocks: Optional[int] = 2,
-        kernel_size: Optional[int] = 32,
-        kernel_stride: Optional[int] = 16,
-        block_size: Optional[int] = 64,
-        topk: Optional[int] = 16,
+        moba_chunk_size: int = 256,
+        moba_topk: int = 8,
+        window_size: Optional[int] = None,
         rope_theta: Optional[float] = 10000.,
         max_position_embeddings: Optional[int] = None,
         layer_idx: int = None,
@@ -303,32 +96,9 @@ class Attention(nn.Module):
         if self.use_rope:   
             self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
         
-        # NOTE added for NSA computation
-        self.init_blocks = init_blocks
-        self.local_blocks = local_blocks
-        self.kernel_size = kernel_size
-        self.kernel_stride = kernel_stride
-        self.block_size = block_size
-        self.topk = topk
+        self.moba_chunk_size = moba_chunk_size
+        self.moba_topk = moba_topk
 
-        # nsa parameteres
-        self.compress_key = torch.nn.Parameter(
-            torch.zeros(self.num_kv_heads, self.head_dim * self.kernel_size, self.head_dim)
-        )
-        self.compress_value = torch.nn.Parameter(
-            torch.zeros(self.num_kv_heads, self.head_dim * self.kernel_size, self.head_dim)
-        )
-
-        # gate function
-        self.gate = torch.nn.Sequential(torch.nn.Linear(self.hidden_size, 3, bias=False), torch.nn.Sigmoid())
-
-        # init parameters
-        self.init_params()
-
-    def init_params(self):
-        for p in self.parameters():
-            torch.nn.init.xavier_uniform_(p)
-    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -350,9 +120,6 @@ class Attention(nn.Module):
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
-
-        # NOTE gate is for native sparse attention
-        gate = self.gate(hidden_states)
 
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
@@ -390,75 +157,53 @@ class Attention(nn.Module):
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         # Contains at least one padding token in the sequence
+        # Decode
         if attention_mask is not None:
             if q.shape[1] == 1 and self.window_size is not None:
                 attention_mask = attention_mask[:, -self.window_size:]
             q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
-            o = fsa_func_varlen(
-                q, k, v, gate.squeeze(0),
-                compress_key=self.compress_key,
-                compress_value=self.compress_value,
+            o = flash_attn_varlen_func(
+                q, k, v,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlen_k,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
-                window_size=self.window_size,
-                kernel_size=self.kernel_size,
-                kernel_stride=self.kernel_stride,
-                block_size=self.block_size,
-                topk=self.topk,
+                causal=True,
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
             o = pad_input(o, indices_q, batch_size, q_len)
+        # Train and Prefill 
         elif cu_seqlens is not None:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-            o = fsa_func_varlen(
-                q.squeeze(0), k.squeeze(0), v.squeeze(0), gate.squeeze(0),
-                compress_key=self.compress_key,
-                compress_value=self.compress_value,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
-                window_size=self.window_size,
-                kernel_size=self.kernel_size,
-                kernel_stride=self.kernel_stride,
-                block_size=self.block_size,
-                topk=self.topk,
+            o = moba_attn_varlen(
+                q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                cu_seqlens=cu_seqlens,
+                max_seqlen=(cu_seqlens[1:] - cu_seqlens[:-1]).max().item(),
+                moba_chunk_size=self.moba_chunk_size,
+                moba_topk=self.moba_topk,
             ).unsqueeze(0)
+            # o = flash_attn_varlen_func(
+            #     q.squeeze(0), k.squeeze(0), v.squeeze(0),
+            #     cu_seqlens_q=cu_seqlens,
+            #     cu_seqlens_k=cu_seqlens,
+            #     max_seqlen_q=max_seqlen,
+            #     max_seqlen_k=max_seqlen,
+            #     causal=True,
+            #     window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+            # ).unsqueeze(0)
         else:
-            cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len, device=q.device).to(torch.int32)
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-            o = fsa_func_varlen(
+            cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len, device=q.device)
+            max_seqlen = q_len
+            o = moba_attn_varlen(
                 q.reshape(batch_size*q_len, self.num_heads, self.head_dim), 
                 k.reshape(batch_size*q_len, self.num_kv_heads, self.head_dim), 
-                v.reshape(batch_size*q_len, self.num_kv_heads, self.head_dim), 
-                gate.reshape(batch_size*q_len, -1),
-                compress_key=self.compress_key,
-                compress_value=self.compress_value,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
-                window_size=self.window_size,
-                kernel_size=self.kernel_size,
-                kernel_stride=self.kernel_stride,
-                block_size=self.block_size,
-                topk=self.topk,
-            ).reshape(batch_size, q_len, self.num_heads, self.head_dim)
+                v.reshape(batch_size*q_len, self.num_kv_heads, self.head_dim),
+                cu_seqlens=cu_seqlens,
+                max_seqlen=q_len,
+                moba_chunk_size=self.moba_chunk_size,
+                moba_topk=self.moba_topk,
+            ).unsqueeze(0)
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
@@ -466,108 +211,3 @@ class Attention(nn.Module):
             attentions = None
 
         return o, attentions, past_key_values
-
-if __name__ == "__main__":
-    # =================================================================================
-    # Original Test Case (for sequences of the same length)
-    # =================================================================================
-    print("--- Running Original Test (Equal Sequence Lengths) ---")
-    B, L, D = 2, 1024, 1024  # Reduced sequence length for faster testing
-    hidden_size = D
-    num_heads = 8
-    num_kv_heads = 8
-    print("Creating model...")
-    try:
-        module = Attention(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-        ).to(torch.bfloat16).cuda()
-        print("Model created successfully.")
-        hidden_state = torch.randn(B, L, D, dtype=torch.bfloat16, device='cuda')
-        print("Computing with equal length inputs...")
-        # This tests the `else` block in the forward pass
-        output, _, _ = module(hidden_state)
-        print(f"Output shape (equal lengths): {output.shape}")
-        print("Original test completed successfully.\n")
-    except Exception as e:
-        print(f"An error occurred during the original test: {e}")
- # =================================================================================
-    # New Test Case for Mismatched cu_seqlens_q and cu_seqlens_k
-    # =================================================================================
-    print("--- Running New Test (Mismatched Sequence Lengths for Q and K/V) ---")
-    # Use different parameters to avoid confusion
-    test_batch_size = 4
-    test_hidden_size = 1024
-    test_num_heads = 8
-    test_num_kv_heads = 4  # Using GQA is a good practice for testing
-    head_dim = test_hidden_size // test_num_heads
-    # Define different sequence lengths for Q and K/V
-    # For example, Q has shorter sequences than K/V
-    q_seqlens = [1, 1, 1, 1]
-    k_seqlens = [300, 600, 150, 40000]
-    # Ensure the test setup is valid
-    assert test_batch_size == len(q_seqlens), "Batch size must match the number of sequence lengths."
-    assert len(q_seqlens) == len(k_seqlens), "Q and K/V must have the same number of sequences in the batch."
-    max_seqlen_q = max(q_seqlens)
-    max_seqlen_k = max(k_seqlens)
-    print(f"Batch Size: {test_batch_size}")
-    print(f"Q Sequence Lengths: {q_seqlens} (Max: {max_seqlen_q})")
-    print(f"K/V Sequence Lengths: {k_seqlens} (Max: {max_seqlen_k})")
-    # Manually create cu_seqlens
-    cu_seqlens_q = torch.tensor([0] + list(torch.cumsum(torch.tensor(q_seqlens), 0)), dtype=torch.int32, device='cuda')
-    cu_seqlens_k = torch.tensor([0] + list(torch.cumsum(torch.tensor(k_seqlens), 0)), dtype=torch.int32, device='cuda')
-    print(f"cu_seqlens_q: {cu_seqlens_q}")
-    print(f"cu_seqlens_k: {cu_seqlens_k}")
-    total_len_q = sum(q_seqlens)
-    total_len_k = sum(k_seqlens)
-    # Create ragged tensors (concatenated along the sequence dimension)
-    # These mimic the output of `unpad_input`
-    q_unpadded = torch.randn(total_len_q, test_num_heads, head_dim, dtype=torch.bfloat16, device='cuda')
-    k_unpadded = torch.randn(total_len_k, test_num_kv_heads, head_dim, dtype=torch.bfloat16, device='cuda')
-    v_unpadded = torch.randn(total_len_k, test_num_kv_heads, head_dim, dtype=torch.bfloat16, device='cuda')
-    gate_unpadded = torch.randn(total_len_q, 3, dtype=torch.bfloat16, device='cuda')
-    print(f"Shape of unpadded Q: {q_unpadded.shape}")
-    print(f"Shape of unpadded K: {k_unpadded.shape}")
-    print(f"Shape of unpadded V: {v_unpadded.shape}")
-    # Create a new model instance for this test
-    try:
-        varlen_module = Attention(
-            hidden_size=test_hidden_size,
-            num_heads=test_num_heads,
-            num_kv_heads=test_num_kv_heads,
-        ).to(torch.bfloat16).cuda()
-        print("Varlen model created successfully.")
-        print("Computing with fsa_func_varlen and mismatched cu_seqlens...")
-        # This call directly tests the target function
-        output_varlen = fsa_func_varlen(
-            q=q_unpadded,
-            k=k_unpadded,
-            v=v_unpadded,
-            gate=gate_unpadded,
-            compress_key=varlen_module.compress_key,
-            compress_value=varlen_module.compress_value,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            num_heads=varlen_module.num_heads,
-            num_kv_heads=varlen_module.num_kv_heads,
-            init_blocks=varlen_module.init_blocks,
-            local_blocks=varlen_module.local_blocks,
-            window_size=varlen_module.window_size,
-            kernel_size=varlen_module.kernel_size,
-            kernel_stride=varlen_module.kernel_stride,
-            block_size=varlen_module.block_size,
-            topk=varlen_module.topk,
-        )
-        print(f"Output shape from fsa_func_varlen: {output_varlen.shape}")
-        # The output should have a total length equal to the total length of Q
-        assert output_varlen.shape[0] == total_len_q
-        assert output_varlen.shape[1] == test_num_heads
-        assert output_varlen.shape[2] == head_dim
-        print("New test for mismatched sequence lengths completed successfully!")
-    except Exception as e:
-        print(f"An error occurred during the mismatched lengths test: {e}")
-        import traceback
-        traceback.print_exc()
